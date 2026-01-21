@@ -1,0 +1,180 @@
+import os
+import asyncio
+import json
+from datetime import datetime
+import sqlite3
+from anthropic import Anthropic
+
+client = Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
+
+class SportsBettingAgent:
+    def __init__(self):
+        self.setup_database()
+    
+    def setup_database(self):
+        conn = sqlite3.connect('predictions.db')
+        c = conn.cursor()
+        c.execute('''
+            CREATE TABLE IF NOT EXISTS predictions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                sport TEXT,
+                game TEXT,
+                date TEXT,
+                prediction_type TEXT,
+                pick TEXT,
+                confidence INTEGER,
+                reasoning TEXT,
+                line REAL,
+                timestamp TEXT,
+                result TEXT
+            )
+        ''')
+        conn.commit()
+        conn.close()
+    
+    async def fetch_nfl_games(self):
+        print("📊 Fetching NFL games...")
+        # TODO: Replace with real API
+        return [
+            {
+                'home': 'Chiefs', 'away': 'Bills', 'date': '2026-01-25',
+                'spread': {'home': -3, 'away': 3}, 'total': 51.5, 'game_id': 'nfl_001'
+            }
+        ]
+    
+    async def fetch_nba_games(self):
+        print("🏀 Fetching NBA games...")
+        # TODO: Replace with real API
+        return [
+            {
+                'home': 'Lakers', 'away': 'Celtics', 'date': '2026-01-21',
+                'spread': {'home': -2.5, 'away': 2.5}, 'total': 225.5, 'game_id': 'nba_001'
+            }
+        ]
+    
+    async def fetch_player_props(self, sport, game_id):
+        print(f"🎯 Fetching player props for {sport} {game_id}...")
+        if sport == 'NBA':
+            return [
+                {'player': 'LeBron James', 'stat': 'points', 'line': 26.5, 'over': -110, 'under': -110},
+                {'player': 'Jayson Tatum', 'stat': 'points', 'line': 28.5, 'over': -115, 'under': -105}
+            ]
+        return []
+    
+    async def analyze_with_claude(self, game_data, props, sport):
+        print(f"🤖 Analyzing {game_data['away']} @ {game_data['home']}...")
+        
+        prompt = f"""Analyze this {sport} matchup and provide predictions.
+
+Game: {game_data['away']} @ {game_data['home']}
+Spread: {game_data['home']} {game_data['spread']['home']}
+Total: {game_data['total']}
+Props: {json.dumps(props, indent=2)}
+
+Return ONLY valid JSON in this exact format:
+{{
+  "spread": {{"pick": "home", "confidence": 8, "reasoning": "explanation"}},
+  "total": {{"pick": "over", "confidence": 7, "reasoning": "explanation"}},
+  "player_props": [
+    {{"player": "Name", "stat": "points", "line": 26.5, "pick": "over", "confidence": 9, "reasoning": "explanation"}}
+  ]
+}}
+
+Pick must be "home"/"away" for spread, "over"/"under" for total/props. Top 3 props only, confidence 7+."""
+
+        response = client.messages.create(
+            model="claude-sonnet-4-20250514",
+            max_tokens=2000,
+            messages=[{"role": "user", "content": prompt}]
+        )
+        
+        result = response.content[0].text.strip()
+        
+        # Clean markdown formatting
+        if "```json" in result:
+            result = result.split("```json")[1].split("```")[0].strip()
+        elif "```" in result:
+            result = result.split("```")[1].split("```")[0].strip()
+        
+        return json.loads(result)
+    
+    def save_prediction(self, sport, game, date, pred_type, pick, confidence, reasoning, line=None):
+        conn = sqlite3.connect('predictions.db')
+        c = conn.cursor()
+        c.execute('''
+            INSERT INTO predictions 
+            (sport, game, date, prediction_type, pick, confidence, reasoning, line, timestamp, result)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (sport, game, date, pred_type, pick, confidence, reasoning, line, 
+              datetime.now().isoformat(), 'pending'))
+        conn.commit()
+        conn.close()
+    
+    async def run(self):
+        print("=" * 60)
+        print("🚀 SPORTS BETTING AI AGENT")
+        print("=" * 60)
+        print(f"⏰ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+        
+        nfl_games = await self.fetch_nfl_games()
+        nba_games = await self.fetch_nba_games()
+        
+        print(f"✅ Found {len(nfl_games)} NFL + {len(nba_games)} NBA games\n")
+        
+        all_predictions = []
+        
+        for game in nfl_games:
+            props = await self.fetch_player_props('NFL', game['game_id'])
+            analysis = await self.analyze_with_claude(game, props, 'NFL')
+            game_str = f"{game['away']} @ {game['home']}"
+            
+            self.save_prediction('NFL', game_str, game['date'], 'spread',
+                               analysis['spread']['pick'], analysis['spread']['confidence'],
+                               analysis['spread']['reasoning'], game['spread']['home'])
+            
+            self.save_prediction('NFL', game_str, game['date'], 'total',
+                               analysis['total']['pick'], analysis['total']['confidence'],
+                               analysis['total']['reasoning'], game['total'])
+            
+            for prop in analysis['player_props']:
+                self.save_prediction('NFL', game_str, game['date'], f"prop_{prop['stat']}",
+                                   f"{prop['player']} {prop['pick']}", prop['confidence'],
+                                   prop['reasoning'], prop['line'])
+            
+            all_predictions.append({'sport': 'NFL', 'game': game_str, 'analysis': analysis})
+        
+        for game in nba_games:
+            props = await self.fetch_player_props('NBA', game['game_id'])
+            analysis = await self.analyze_with_claude(game, props, 'NBA')
+            game_str = f"{game['away']} @ {game['home']}"
+            
+            self.save_prediction('NBA', game_str, game['date'], 'spread',
+                               analysis['spread']['pick'], analysis['spread']['confidence'],
+                               analysis['spread']['reasoning'], game['spread']['home'])
+            
+            self.save_prediction('NBA', game_str, game['date'], 'total',
+                               analysis['total']['pick'], analysis['total']['confidence'],
+                               analysis['total']['reasoning'], game['total'])
+            
+            for prop in analysis['player_props']:
+                self.save_prediction('NBA', game_str, game['date'], f"prop_{prop['stat']}",
+                                   f"{prop['player']} {prop['pick']}", prop['confidence'],
+                                   prop['reasoning'], prop['line'])
+            
+            all_predictions.append({'sport': 'NBA', 'game': game_str, 'analysis': analysis})
+        
+        print("\n" + "=" * 60)
+        print(f"✅ COMPLETE - {len(all_predictions)} games analyzed")
+        print("=" * 60 + "\n")
+        
+        for pred in all_predictions:
+            print(f"{pred['sport']}: {pred['game']}")
+            print(f"  Spread: {pred['analysis']['spread']['pick'].upper()} (Conf: {pred['analysis']['spread']['confidence']})")
+            print(f"  Total: {pred['analysis']['total']['pick'].upper()} (Conf: {pred['analysis']['total']['confidence']})")
+            print(f"  Props: {len(pred['analysis']['player_props'])} picks\n")
+        
+        return all_predictions
+
+if __name__ == "__main__":
+    agent = SportsBettingAgent()
+    asyncio.run(agent.run())
